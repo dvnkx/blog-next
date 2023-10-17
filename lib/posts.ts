@@ -1,49 +1,112 @@
-import fs from "fs";
-import path from "path";
-import matter from "gray-matter";
-import { remark } from "remark";
-import html from "remark-html";
+import { compileMDX } from "next-mdx-remote/rsc";
+import rehypeAutolinkHeadings from "rehype-autolink-headings";
+import rehypeHighlight from "rehype-highlight";
+import rehypeSlug from "rehype-slug";
+import Video from "@/app/components/Video";
+import CustomImage from "@/app/components/CustomImage";
 
-const postsDirectory = path.join(process.cwd(), "blogposts");
+type FileTree = {
+  tree: [
+    {
+      path: string;
+    }
+  ];
+};
 
-export function getSortedPostsDate() {
-  const filenames = fs.readdirSync(postsDirectory);
-  const allPostsDate = filenames.map((filename) => {
-    const id = filename.replace(/\.md$/, "");
+export async function getPostByName(
+  fileName: string
+): Promise<BlogPost | undefined> {
+  const res = await fetch(
+    `https://raw.githubusercontent.com/dvnkx/next-blogposts/main/${fileName}`,
+    {
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${process.env.GH_TOKEN}`,
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+    }
+  );
 
-    const fullPath = path.join(postsDirectory, filename);
-    const fileContents = fs.readFileSync(fullPath, "utf-8");
+  if (!res.ok) return undefined;
 
-    const matterResult = matter(fileContents);
+  const rawMDX = await res.text();
 
-    const blogPost: BlogPost = {
-      id,
-      title: matterResult.data.title,
-      date: matterResult.data.date,
-    };
+  if (rawMDX === "404: Not Found") return undefined;
 
-    return blogPost;
+  const { frontmatter, content } = await compileMDX<{
+    title: string;
+    date: string;
+    tags: string[];
+  }>({
+    source: rawMDX,
+    components: {
+      Video,
+      CustomImage,
+    },
+    options: {
+      parseFrontmatter: true,
+      mdxOptions: {
+        rehypePlugins: [
+          // @ts-ignore-start
+          rehypeHighlight,
+          // @ts-ignore-end
+          rehypeSlug,
+          [
+            rehypeAutolinkHeadings,
+            {
+              behavior: "wrap",
+            },
+          ],
+        ],
+      },
+    },
   });
 
-  return allPostsDate.sort((a, b) => (a.date < b.date ? 1 : -1));
-}
+  const id = fileName.replace(/\.mdx$/, "");
 
-export async function getPostDate(id: string) {
-  const fullPath = path.join(postsDirectory, `${id}.md`);
-  const fileContents = fs.readFileSync(fullPath, "utf-8");
-
-  const matterResult = matter(fileContents);
-
-  const processContent = await remark().use(html).process(matterResult.content);
-
-  const contentHtml = processContent.toString();
-
-  const blogPostWithHTML: BlogPost & { contentHtml: string } = {
-    id,
-    title: matterResult.data.title,
-    date: matterResult.data.date,
-    contentHtml,
+  const blogPostObj: BlogPost = {
+    meta: {
+      id,
+      title: frontmatter.title,
+      date: frontmatter.date,
+      tags: frontmatter.tags,
+    },
+    content,
   };
 
-  return blogPostWithHTML;
+  return blogPostObj;
+}
+
+export async function getPostsMeta(): Promise<Meta[] | undefined> {
+  const res = await fetch(
+    "https://api.github.com/repos/dvnkx/next-blogposts/git/trees/main?recursive=1",
+    {
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${process.env.GH_TOKEN}`,
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+    }
+  );
+
+  if (!res.ok || typeof res === "undefined") return undefined;
+
+  const repoFileTree: FileTree = await res.json();
+
+  const filesArray = repoFileTree.tree
+    .map((obj) => obj.path)
+    .filter((path) => path.endsWith(".mdx"));
+
+  const posts: Meta[] = [];
+
+  for (const file of filesArray) {
+    const post = await getPostByName(file);
+
+    if (post) {
+      const { meta } = post;
+      posts.push(meta);
+    }
+  }
+
+  return posts.sort((a, b) => (a.date < b.date ? 1 : -1));
 }
